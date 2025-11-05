@@ -292,6 +292,147 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+// Build transition matrix from historical data
+pub fn build_transition_matrix(data: &HistoricalData) -> TransitionMatrix {
+    // Initialize 3x3 count matrix to track state transitions
+    let mut count_matrix = Array2::<f64>::zeros((3, 3));
+    let states = vec![StateType::Sunny, StateType::Rainy, StateType::Cloudy];
+    
+    // Iterate through sequential state pairs and increment counts
+    for (current_state, next_state) in data.state_pairs() {
+        // Get indices for current and next states
+        let current_idx = states.iter().position(|&s| s == current_state.state).unwrap();
+        let next_idx = states.iter().position(|&s| s == next_state.state).unwrap();
+        
+        // Increment the count for this transition
+        count_matrix[[current_idx, next_idx]] += 1.0;
+    }
+    
+    // Normalize each row by dividing by row sum to get probabilities
+    let mut transition_matrix = TransitionMatrix {
+        matrix: count_matrix.clone(),
+        states: states.clone(),
+    };
+    
+    for i in 0..3 {
+        let row_sum: f64 = count_matrix.row(i).sum();
+        
+        // If row sum is 0 (no transitions from this state), set uniform distribution
+        if row_sum > 0.0 {
+            for j in 0..3 {
+                transition_matrix.matrix[[i, j]] = count_matrix[[i, j]] / row_sum;
+            }
+        } else {
+            // Set uniform distribution (1/3 for each state)
+            for j in 0..3 {
+                transition_matrix.matrix[[i, j]] = 1.0 / 3.0;
+            }
+        }
+    }
+    
+    // Validate that all rows sum to 1.0 within floating-point tolerance
+    debug_assert!(
+        transition_matrix.is_stochastic(),
+        "Transition matrix is not stochastic"
+    );
+    
+    transition_matrix
+}
+
+// Simulate weather using probabilistic sampling
+pub fn simulate_weather(
+    matrix: &TransitionMatrix,
+    initial_state: StateType,
+    days: usize,
+) -> Vec<WeatherState> {
+    
+    // Initialize result vector with initial state
+    let mut results = Vec::with_capacity(days);
+    let initial_timestamp = 0; // Starting timestamp
+    results.push(WeatherState::new(initial_state, initial_timestamp));
+    
+    let mut current_state = initial_state;
+    
+    // For each day, simulate the next state
+    for day in 1..days {
+        // Get current state's transition probabilities
+        let current_idx = matrix.state_index(current_state).unwrap();
+        let probabilities = matrix.matrix.row(current_idx);
+        
+        // Use weighted random sampling to select next state based on probabilities
+        let next_state = weighted_random_sample(&matrix.states, probabilities.as_slice().unwrap());
+        
+        // Append selected state to results with timestamp
+        let timestamp = initial_timestamp + (day as i64 * 86400); // Add days in seconds
+        results.push(WeatherState::new(next_state, timestamp));
+        
+        current_state = next_state;
+    }
+    
+    results
+}
+
+// Helper function for weighted random sampling
+fn weighted_random_sample(states: &[StateType], probabilities: &[f64]) -> StateType {
+    // Generate a random number between 0 and 1
+    let mut buf = [0u8; 8];
+    getrandom::getrandom(&mut buf).expect("Failed to generate random number");
+    let random_value = u64::from_le_bytes(buf) as f64 / u64::MAX as f64;
+    
+    // Use cumulative probabilities to select a state
+    let mut cumulative = 0.0;
+    for (i, &prob) in probabilities.iter().enumerate() {
+        cumulative += prob;
+        if random_value <= cumulative {
+            return states[i];
+        }
+    }
+    
+    // Fallback to last state (should not happen with valid probabilities)
+    states[states.len() - 1]
+}
+
+// Calculate steady-state distribution using power iteration method
+pub fn calculate_steady_state(matrix: &TransitionMatrix) -> Vec<f64> {
+    const MAX_ITERATIONS: usize = 1000;
+    const CONVERGENCE_THRESHOLD: f64 = 1e-8;
+    
+    let n = matrix.matrix.nrows();
+    let mut current_matrix = matrix.matrix.clone();
+    let mut previous_matrix = matrix.matrix.clone();
+    
+    // Use power iteration method: multiply matrix by itself repeatedly
+    for iteration in 0..MAX_ITERATIONS {
+        // Multiply matrix by itself
+        current_matrix = current_matrix.dot(&matrix.matrix);
+        
+        // Check for convergence when successive iterations differ by less than threshold
+        if iteration > 0 {
+            let mut max_diff = 0.0;
+            for i in 0..n {
+                for j in 0..n {
+                    let diff = (current_matrix[[i, j]] - previous_matrix[[i, j]]).abs();
+                    if diff > max_diff {
+                        max_diff = diff;
+                    }
+                }
+            }
+            
+            // If converged, extract stationary distribution
+            if max_diff < CONVERGENCE_THRESHOLD {
+                // Extract the first row (all rows should be identical at steady state)
+                return current_matrix.row(0).to_vec();
+            }
+        }
+        
+        previous_matrix = current_matrix.clone();
+    }
+    
+    // If we didn't converge, return the current approximation
+    // Extract stationary distribution from converged matrix (first row)
+    current_matrix.row(0).to_vec()
+}
+
 #[wasm_bindgen]
 pub fn init_markov_engine() -> Result<(), JsValue> {
     // Initialize the Markov chain engine
