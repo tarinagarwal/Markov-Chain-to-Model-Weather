@@ -1,8 +1,13 @@
 use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Mutex;
 use ndarray::Array2;
 use serde_json::Value;
+
+// Global state storage for transition matrix and simulation results
+static TRANSITION_MATRIX: Mutex<Option<TransitionMatrix>> = Mutex::new(None);
+static SIMULATION_RESULTS: Mutex<Option<Vec<WeatherState>>> = Mutex::new(None);
 
 // StateType enum with Sunny, Rainy, Cloudy variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -433,11 +438,221 @@ pub fn calculate_steady_state(matrix: &TransitionMatrix) -> Vec<f64> {
     current_matrix.row(0).to_vec()
 }
 
+// WASM Bindings and JavaScript Interface
+
 #[wasm_bindgen]
 pub fn init_markov_engine() -> Result<(), JsValue> {
-    // Initialize the Markov chain engine
-    // This function will be called from JavaScript to set up the WASM module
+    // Set up panic hook for better error messages in browser console
+    #[cfg(feature = "console_error_panic_hook")]
+    console_error_panic_hook::set_once();
+    
+    // Initialize random number generator for WASM environment
+    // getrandom is already configured with "js" feature in Cargo.toml
+    
+    // Clear any existing state
+    *TRANSITION_MATRIX.lock().unwrap() = None;
+    *SIMULATION_RESULTS.lock().unwrap() = None;
+    
     Ok(())
+}
+
+#[wasm_bindgen]
+pub fn process_weather_data(json_str: &str) -> Result<JsValue, JsValue> {
+    // Call parse_weather_data to convert JSON to HistoricalData
+    let historical_data = parse_weather_data(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse weather data: {}", e)))?;
+    
+    // Call build_transition_matrix to generate transition matrix
+    let matrix = build_transition_matrix(&historical_data);
+    
+    // Validate the matrix is stochastic
+    if !matrix.is_stochastic() {
+        return Err(JsValue::from_str("Generated transition matrix is not stochastic"));
+    }
+    
+    // Store matrix in static storage for later access
+    *TRANSITION_MATRIX.lock().unwrap() = Some(matrix.clone());
+    
+    // Serialize matrix to JsValue using serde-wasm-bindgen
+    let matrix_data = MatrixData {
+        matrix: matrix.matrix.as_slice().unwrap().to_vec(),
+        states: matrix.states.iter().map(|s| s.to_string()).collect(),
+        rows: matrix.matrix.nrows(),
+        cols: matrix.matrix.ncols(),
+    };
+    
+    serde_wasm_bindgen::to_value(&matrix_data)
+        .map_err(|e| JsValue::from_str(&format!("Failed to serialize matrix: {}", e)))
+}
+
+#[wasm_bindgen]
+pub fn run_simulation(days: usize, initial_state_str: &str) -> Result<JsValue, JsValue> {
+    // Parse initial state string to StateType enum
+    let initial_state = match initial_state_str.to_lowercase().as_str() {
+        "sunny" => StateType::Sunny,
+        "rainy" => StateType::Rainy,
+        "cloudy" => StateType::Cloudy,
+        _ => return Err(JsValue::from_str(&format!("Invalid initial state: {}. Must be 'Sunny', 'Rainy', or 'Cloudy'", initial_state_str))),
+    };
+    
+    // Retrieve stored transition matrix from static storage
+    let matrix_guard = TRANSITION_MATRIX.lock().unwrap();
+    let matrix = matrix_guard.as_ref()
+        .ok_or_else(|| JsValue::from_str("No transition matrix available. Call process_weather_data first."))?;
+    
+    // Call simulate_weather with matrix, initial state, and days
+    let simulation_results = simulate_weather(matrix, initial_state, days);
+    
+    // Store simulation results for statistics calculation
+    *SIMULATION_RESULTS.lock().unwrap() = Some(simulation_results.clone());
+    
+    // Serialize simulation results to JsValue
+    let results_data: Vec<SimulationDay> = simulation_results.iter().enumerate().map(|(idx, ws)| {
+        SimulationDay {
+            day: idx,
+            state: ws.state.to_string(),
+            timestamp: ws.timestamp,
+        }
+    }).collect();
+    
+    serde_wasm_bindgen::to_value(&results_data)
+        .map_err(|e| JsValue::from_str(&format!("Failed to serialize simulation results: {}", e)))
+}
+
+#[wasm_bindgen]
+pub fn get_statistics() -> Result<JsValue, JsValue> {
+    // Retrieve stored transition matrix
+    let matrix_guard = TRANSITION_MATRIX.lock().unwrap();
+    let matrix = matrix_guard.as_ref()
+        .ok_or_else(|| JsValue::from_str("No transition matrix available. Call process_weather_data first."))?;
+    
+    // Calculate steady-state distribution using calculate_steady_state
+    let steady_state = calculate_steady_state(matrix);
+    
+    // Compute state distribution from last simulation results
+    let simulation_guard = SIMULATION_RESULTS.lock().unwrap();
+    let state_distribution = if let Some(results) = simulation_guard.as_ref() {
+        calculate_state_distribution(results)
+    } else {
+        // If no simulation has been run, return empty distribution
+        vec![0.0, 0.0, 0.0]
+    };
+    
+    // Calculate average streak lengths for each state
+    let average_streaks = if let Some(results) = simulation_guard.as_ref() {
+        calculate_average_streaks(results)
+    } else {
+        vec![0.0, 0.0, 0.0]
+    };
+    
+    // Serialize all statistics to JsValue as structured object
+    let statistics = Statistics {
+        steady_state: StateProbabilities {
+            sunny: steady_state[0],
+            rainy: steady_state[1],
+            cloudy: steady_state[2],
+        },
+        distribution: StateProbabilities {
+            sunny: state_distribution[0],
+            rainy: state_distribution[1],
+            cloudy: state_distribution[2],
+        },
+        average_streaks: StateProbabilities {
+            sunny: average_streaks[0],
+            rainy: average_streaks[1],
+            cloudy: average_streaks[2],
+        },
+    };
+    
+    serde_wasm_bindgen::to_value(&statistics)
+        .map_err(|e| JsValue::from_str(&format!("Failed to serialize statistics: {}", e)))
+}
+
+// Helper structures for serialization
+
+#[derive(Serialize, Deserialize)]
+struct MatrixData {
+    matrix: Vec<f64>,
+    states: Vec<String>,
+    rows: usize,
+    cols: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SimulationDay {
+    day: usize,
+    state: String,
+    timestamp: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StateProbabilities {
+    sunny: f64,
+    rainy: f64,
+    cloudy: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Statistics {
+    steady_state: StateProbabilities,
+    distribution: StateProbabilities,
+    average_streaks: StateProbabilities,
+}
+
+// Helper function to calculate state distribution from simulation results
+fn calculate_state_distribution(results: &[WeatherState]) -> Vec<f64> {
+    let total = results.len() as f64;
+    if total == 0.0 {
+        return vec![0.0, 0.0, 0.0];
+    }
+    
+    let mut counts = vec![0.0, 0.0, 0.0];
+    for state in results {
+        match state.state {
+            StateType::Sunny => counts[0] += 1.0,
+            StateType::Rainy => counts[1] += 1.0,
+            StateType::Cloudy => counts[2] += 1.0,
+        }
+    }
+    
+    counts.iter().map(|&c| c / total).collect()
+}
+
+// Helper function to calculate average streak lengths for each state
+fn calculate_average_streaks(results: &[WeatherState]) -> Vec<f64> {
+    if results.is_empty() {
+        return vec![0.0, 0.0, 0.0];
+    }
+    
+    let states = [StateType::Sunny, StateType::Rainy, StateType::Cloudy];
+    let mut average_streaks = vec![0.0, 0.0, 0.0];
+    
+    for (idx, &target_state) in states.iter().enumerate() {
+        let mut streak_lengths = Vec::new();
+        let mut current_streak = 0;
+        
+        for weather_state in results {
+            if weather_state.state == target_state {
+                current_streak += 1;
+            } else if current_streak > 0 {
+                streak_lengths.push(current_streak);
+                current_streak = 0;
+            }
+        }
+        
+        // Don't forget the last streak if it ends at the end of results
+        if current_streak > 0 {
+            streak_lengths.push(current_streak);
+        }
+        
+        // Calculate average
+        if !streak_lengths.is_empty() {
+            let sum: usize = streak_lengths.iter().sum();
+            average_streaks[idx] = sum as f64 / streak_lengths.len() as f64;
+        }
+    }
+    
+    average_streaks
 }
 
 #[cfg(test)]
