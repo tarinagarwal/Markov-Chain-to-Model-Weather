@@ -3,6 +3,10 @@ import { useMarkovChain } from "./hooks/useMarkovChain";
 import CitySelector from "./components/CitySelector";
 import DataFetcher from "./components/DataFetcher";
 import SimulationControl from "./components/SimulationControl";
+import TransitionMatrixView from "./components/TransitionMatrixView";
+import StateTransitionDiagram from "./components/StateTransitionDiagram";
+import WeatherTimeline from "./components/WeatherTimeline";
+import StatisticsPanel from "./components/StatisticsPanel";
 import "./App.css";
 
 interface MatrixData {
@@ -27,15 +31,21 @@ interface SimulationResults {
   };
 }
 
+interface Statistics {
+  distribution: Record<string, number>;
+  steadyState: Record<string, number>;
+  averageStreaks?: Record<string, number>;
+}
+
 function App() {
   // Global state
   const [selectedCity, setSelectedCity] = useState<string>("Mumbai");
-  const [historicalData, setHistoricalData] = useState<any>(null);
   const [transitionMatrix, setTransitionMatrix] = useState<MatrixData | null>(
     null
   );
   const [simulationResults, setSimulationResults] =
     useState<SimulationResults | null>(null);
+  const [statistics, setStatistics] = useState<Statistics | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,6 +53,7 @@ function App() {
   const {
     processData,
     runSimulation,
+    getStatistics,
     isReady,
     error: wasmError,
   } = useMarkovChain();
@@ -51,9 +62,9 @@ function App() {
   const handleCityChange = useCallback((city: string) => {
     setSelectedCity(city);
     // Reset state when city changes
-    setHistoricalData(null);
     setTransitionMatrix(null);
     setSimulationResults(null);
+    setStatistics(null);
     setError(null);
   }, []);
 
@@ -84,6 +95,33 @@ function App() {
             city: selectedCity,
           },
         });
+
+        // Fetch statistics after simulation
+        try {
+          const stats = await getStatistics();
+          // Transform the statistics to match our interface
+          const transformedStats: Statistics = {
+            distribution: {
+              Sunny: stats.distribution.sunny || 0,
+              Rainy: stats.distribution.rainy || 0,
+              Cloudy: stats.distribution.cloudy || 0,
+            },
+            steadyState: {
+              Sunny: stats.steady_state.sunny || 0,
+              Rainy: stats.steady_state.rainy || 0,
+              Cloudy: stats.steady_state.cloudy || 0,
+            },
+            averageStreaks: {
+              Sunny: stats.average_streaks.sunny || 0,
+              Rainy: stats.average_streaks.rainy || 0,
+              Cloudy: stats.average_streaks.cloudy || 0,
+            },
+          };
+          setStatistics(transformedStats);
+        } catch (statsErr) {
+          console.error("Failed to fetch statistics:", statsErr);
+          // Don't fail the whole simulation if statistics fail
+        }
       } catch (err) {
         const errorMessage =
           err instanceof Error ? err.message : "Failed to run simulation";
@@ -92,7 +130,7 @@ function App() {
         setIsLoading(false);
       }
     },
-    [runSimulation, transitionMatrix, selectedCity]
+    [runSimulation, getStatistics, transitionMatrix, selectedCity]
   );
 
   return (
@@ -168,12 +206,44 @@ function App() {
                 disabled={!transitionMatrix}
               />
 
+              {/* Visualization Components */}
+              {transitionMatrix && (
+                <>
+                  <TransitionMatrixView
+                    matrix={convertFlatMatrixTo2D(
+                      transitionMatrix.matrix,
+                      transitionMatrix.rows,
+                      transitionMatrix.cols
+                    )}
+                    states={transitionMatrix.states}
+                  />
+
+                  <StateTransitionDiagram
+                    matrix={convertFlatMatrixTo2D(
+                      transitionMatrix.matrix,
+                      transitionMatrix.rows,
+                      transitionMatrix.cols
+                    )}
+                    states={transitionMatrix.states}
+                  />
+                </>
+              )}
+
+              {simulationResults && (
+                <WeatherTimeline
+                  simulationData={simulationResults.predictions}
+                />
+              )}
+
+              {statistics && <StatisticsPanel statistics={statistics} />}
+
               {/* Debug Info */}
               <div className="bg-gray-100 rounded-lg p-4 text-sm">
                 <h3 className="font-semibold mb-2">Debug Info:</h3>
                 <p>WASM Ready: {isReady ? "Yes" : "No"}</p>
                 <p>Has Matrix: {transitionMatrix ? "Yes" : "No"}</p>
                 <p>Has Simulation: {simulationResults ? "Yes" : "No"}</p>
+                <p>Has Statistics: {statistics ? "Yes" : "No"}</p>
               </div>
             </div>
           </>
@@ -181,6 +251,19 @@ function App() {
       </div>
     </div>
   );
+}
+
+// Helper function to convert flat matrix array to 2D array
+function convertFlatMatrixTo2D(
+  flatMatrix: number[],
+  rows: number,
+  cols: number
+): number[][] {
+  const matrix: number[][] = [];
+  for (let i = 0; i < rows; i++) {
+    matrix.push(flatMatrix.slice(i * cols, (i + 1) * cols));
+  }
+  return matrix;
 }
 
 export default App;
