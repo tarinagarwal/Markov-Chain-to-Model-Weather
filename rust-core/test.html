@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WASM Module Test</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 50px auto;
+        padding: 20px;
+      }
+      .success {
+        color: green;
+        font-weight: bold;
+      }
+      .error {
+        color: red;
+        font-weight: bold;
+      }
+      button {
+        padding: 10px 20px;
+        font-size: 16px;
+        cursor: pointer;
+      }
+      #output {
+        margin-top: 20px;
+        padding: 15px;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        background-color: #f9f9f9;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Weather Markov Chain WASM Module Test</h1>
+    <p>This page tests the compiled WASM module.</p>
+
+    <button onclick="testWasm()">Test WASM Module</button>
+
+    <div id="output"></div>
+
+    <script type="module">
+      import init, { init_markov_engine } from "./pkg/rust_core.js";
+
+      window.testWasm = async function () {
+        const output = document.getElementById("output");
+        output.innerHTML = "<p>Loading WASM module...</p>";
+
+        try {
+          // Initialize the WASM module
+          await init();
+          output.innerHTML +=
+            '<p class="success">✓ WASM module loaded successfully!</p>';
+
+          // Test the init_markov_engine function
+          init_markov_engine();
+          output.innerHTML +=
+            '<p class="success">✓ init_markov_engine() executed successfully!</p>';
+
+          output.innerHTML +=
+            '<p class="success"><strong>All tests passed! The WASM module is working correctly.</strong></p>';
+        } catch (error) {
+          output.innerHTML += `<p class="error">✗ Error: ${error.message}</p>`;
+          console.error("WASM Error:", error);
+        }
+      };
+    </script>
+  </body>
+</html>

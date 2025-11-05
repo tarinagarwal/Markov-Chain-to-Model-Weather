@@ -1,0 +1,16 @@
+
+# Rust
+rust-core/target/
+rust-core/Cargo.lock
+rust-core/pkg/
+
+# Node.js
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+.kiro
+frontend/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
